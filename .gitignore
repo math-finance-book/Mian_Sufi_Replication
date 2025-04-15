@@ -172,3 +172,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Testing Files
+replication_testing.ipynb
+Figure1a.png
+Figure1b.png
