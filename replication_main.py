@@ -338,3 +338,310 @@ table_4.to_excel('Table4.xlsx')
 ####################################################################################
 
 
+
+####################################################################################
+#Table 6 - Is Non-Tradable Employment Growth Driven By Credit Supply Tightening?
+####################################################################################
+writer = pd.ExcelWriter('Table6.xlsx')
+
+data = df_county
+
+dep_vars = [
+    "CCemp2_1_4_0709_2",
+    "CCemp2_5_9_0709_2",
+    "CCemp2_10_19_0709_2",
+    "CCemp2_20_49_0709_2",
+    "CCemp2_50_99_0709_2",
+    "CCemp2_100plus_0709_2"
+]
+
+# Dictionary to store results
+results = {}
+ols_results_df = pd.DataFrame()
+
+iv_results = {}
+iv_results_df = pd.DataFrame()
+
+sizes = ['1 to 4','5 to 9','10 to 19','20 to 49','50 to 99','100+']
+
+# Loop through each dependent variable
+for var in dep_vars:
+    # OLS Regression
+    df = data[[var, "netwp_h", "total", "statename"]].dropna()
+    y = df[var]
+    X = sm.add_constant(df["netwp_h"])
+    model = sm.WLS(y, X, weights=df["total"])
+    result = model.fit(cov_type="cluster", cov_kwds={"groups": df["statename"]})
+    ols_results_df[var] = [round(result.params['netwp_h'],3), round(result.bse['netwp_h'],3),round(result.pvalues['netwp_h'],3)]
+
+    # IV Regression
+    df = data[[var, "netwp_h", "elasticity", "total", "statename"]].dropna()
+    formula = f"{var} ~ 1 + [netwp_h ~ elasticity]"
+    model = IV2SLS.from_formula(
+        formula,
+        data=df,
+        weights=df["total"]
+    ).fit(cov_type="clustered", clusters=df["statename"])
+    iv_results_df[var] = [round(model.params['netwp_h'],3), round(model.std_errors['netwp_h'],3), round(model.pvalues['netwp_h'],3)]
+
+#results
+ols_results_df.rename(index={0: 'Coefficient', 1: 'Std. Error', 2: 'P-value'}, inplace=True)
+ols_results_df.columns = sizes
+ols_results_df=ols_results_df.reset_index()
+ols_results_df['specification']='OLS'
+ols_results_df.set_index(['specification','index'],inplace=True)
+ols_results_df.columns.names = ['Establishment Size In Terms Of Number of Employees']
+ols_results_df.index.names = ['specification','Change in Housing Net Worth, 2006-2009']
+
+iv_results_df.rename(index={0: 'Coefficient', 1: 'Std. Error', 2: 'P-value'}, inplace=True)
+iv_results_df.columns = sizes
+iv_results_df=iv_results_df.reset_index()
+iv_results_df['specification']='IV'
+iv_results_df.set_index(['specification','index'],inplace=True)
+iv_results_df.columns.names = ['Establishment Size In Terms Of Number of Employees']
+iv_results_df.index.names = ['specification','Change in Housing Net Worth, 2006-2009']
+
+table_6_AB = pd.concat([ols_results_df,iv_results_df])
+table_6_AB.to_excel(writer, sheet_name='PanelAB')
+
+df_panelc = data.copy()
+df_panelc = df_panelc.replace([np.inf, -np.inf], np.nan)
+#df_panelc = df_panelc[df_panelc["netwp_h"].notna()]
+df_panelc = df_panelc.dropna(subset=["elasticity", "netwp_h", "total", "statename"])
+
+# Compute median of Clocalshare
+median_localshare = df_panelc["Clocalshare"].median()
+# Create 'national' and 'local' dummies
+df_panelc["national"] = (df_panelc["Clocalshare"] < median_localshare).astype(int)
+df_panelc["local"] = (df_panelc["Clocalshare"] >= median_localshare).astype(int)
+# First stage: netwp_h ~ elasticity
+X_fs = sm.add_constant(df_panelc["elasticity"])
+y_fs = df_panelc["netwp_h"]
+model_fs = sm.WLS(y_fs, X_fs, weights=df_panelc["total"]).fit(cov_type="cluster", cov_kwds={"groups": df_panelc["statename"]})
+df_panelc["netwpp"] = model_fs.fittedvalues
+# Regressions by group
+results = {}
+market_results_df = pd.DataFrame()
+
+for group, label in zip(["national", "local"], ["National", "Local"]):
+    subset = df_panelc[df_panelc[group] == 1]
+
+    for var in ["netwp_h", "netwpp"]:
+        X = sm.add_constant(subset[var])
+        y = subset["CCemp2_0709_2"]
+        model = sm.WLS(y, X, weights=subset["total"]).fit(cov_type="cluster", cov_kwds={"groups": subset["statename"]})
+
+        key = f"{label} - {var}"
+        results[key] = model
+        #print(f"\nResults for {key}")
+        #print(model.summary())
+        market_results_df[key] = [round(model.params[var],3), round(model.bse[var],3),round(model.pvalues[var],3)]
+
+market_results_df.rename(index={0: 'Coefficient', 1: 'Std. Error', 2: 'P-value'}, inplace=True)
+market_results_df.index.names = ['Change in Housing Net Worth, 2006-2009']
+
+columns = pd.MultiIndex.from_tuples([('National', 'OLS'),
+                                    ('Local', 'IV'),
+                                     ('National', 'OLS'),
+                                     ('Local', 'IV')],
+                                    names=['Banking Type','Specification']) #names=['Metric', 'Sub']
+market_results_df.columns=columns
+table_6_C = market_results_df.copy()
+table_6_C.to_excel(writer, sheet_name='PanelC')
+
+writer.close()
+
+####################################################################################
+#Table 7 - Tradable Employment Growth And The Housing Net Worth Shock
+####################################################################################
+data = df_county
+
+shock_vars = [f"C2D06share{i}" for i in range(1, 24)] # List of shock variable columns
+data["sqrt_total"] = np.sqrt(data["total"])
+data = data.dropna(subset=["CCemp2_0709_2", "CH2emp2_0709_1", "netwp_h", "total", "statename"]) # Drop missing values for needed variables
+# (1)
+y1 = data["CCemp2_0709_1"]
+X1 = sm.add_constant(data["netwp_h"])
+wls1 = sm.WLS(y1, X1, weights=data["total"])
+res1 = wls1.fit(cov_type='cluster', cov_kwds={'groups': data['statename']})
+# (2)
+y2 = data["CH2emp2_0709_4"]
+X2 = sm.add_constant(data["netwp_h"])
+wls2 = sm.WLS(y2, X2, weights=data["total"])
+res2 = wls2.fit(cov_type='cluster', cov_kwds={'groups': data['statename']})
+# (3)
+y3 = data["CCemp2_0709_1"]
+X3 = sm.add_constant(data[["netwp_h"]+shock_vars[:-1] ])
+wls3 = sm.WLS(y3, X3, weights=data["total"])
+res3 = wls3.fit(cov_type='cluster', cov_kwds={'groups': data['statename']})
+# (4)
+y4 = data["CH2emp2_0709_4"]
+X4 = sm.add_constant(data[["netwp_h"]+shock_vars[:-1] ])
+wls4 = sm.WLS(y4, X4, weights=data["total"])
+res4 = wls4.fit(cov_type='cluster', cov_kwds={'groups': data['statename']})
+# (5)
+data = df_industry_county
+    # Interaction term
+data["netwpherf_b"] = data["Iherf"] * data["netwp_h"]
+    # Drop missing outcome or regressor
+data = data.dropna(subset=["netwp_h", "CIemp2_0709"])
+    # Identify unique industries and assign a tag
+data["indtag"] = data.duplicated(subset=["industry"], keep="first").apply(lambda x: 0 if x else 1)
+    # Create weighted percentiles based on Iherf
+        # Keep temp only where indtag==1 and Iemp2_2007 is not missing
+data["temp"] = np.where((data["indtag"] == 1) & (data["Iemp2_2007"].notna()), 1, 0)
+    # Sort by Iherf
+data = data.sort_values(by="Iherf").copy()
+    # Weighted cumulative sum of Iemp2_2007 by temp
+data["runsumemp"] = (data["Iemp2_2007"] * data["temp"]).cumsum()
+totsumemp = (data["Iemp2_2007"] * data["temp"]).sum()
+data["Ipercentile"] = data["runsumemp"] / totsumemp
+    # Create decile groupings (1 to 10)
+#data["Ipercentile_10"] = (data["Ipercentile"] * 10).astype(int) + 1
+#data["Ipercentile_10"] = data["Ipercentile_10"].clip(upper=10)
+    # Run the regression: Table 5, Col 5
+reg_data = data.dropna(subset=["CIemp2_2007", "statename"])
+res5 = smf.wls(
+    formula="CIemp2_0709 ~ netwp_h + Iherf + netwpherf_b",
+    data=reg_data,
+    weights=reg_data["CIemp2_2007"]
+).fit(cov_type="cluster", cov_kwds={"groups": reg_data["statename"]})
+# (6)
+data = df_industry_county
+# Create interaction term: netwpherf = Iherf * netwp_h
+data["netwpherf_b"] = data["Iherf"] * data["netwp_h"]
+# Drop missing values for regression
+data.dropna(subset=["CIemp2_0709", "netwp_h", "Iherf", "netwpherf_b", "CIemp2_2007", "statename","naics"],inplace=True)
+res6 = smf.wls(
+    #formula="CIemp2_0709 ~ netwp_h + Iherf + netwpherf",
+    formula="CIemp2_0709 ~ netwp_h + netwpherf_b -1 + C(naics)",
+    data=data,
+    weights=data["CIemp2_2007"]
+).fit(cov_type="cluster", cov_kwds={"groups": data["statename"]})
+# (7)
+res7 = smf.wls(
+    formula="CIemp2_0709 ~ netwpherf_b -1 + C(naics)+ C(countyname)",
+    data=data,
+    weights=data["CIemp2_2007"]
+).fit(cov_type="cluster", cov_kwds={"groups": data["statename"]})
+
+# Create MultiIndex for rows
+index = pd.MultiIndex.from_tuples([('Change in Housing Net Worth,2006-2009', 'coef.'), ('Change in Housing Net Worth,2006-2009', 'std. err'), ('Change in Housing Net Worth,2006-2009', 'p value'),
+                                   ('Industry Geographical Herfindahl Index', 'coef.'), ('Industry Geographical Herfindahl Index', 'std. err'), ('Industry Geographical Herfindahl Index', 'p value'),
+                                   ('ΔHNW * (Geographical Herfindahl)', 'coef.'), ('ΔHNW * (Geographical Herfindahl)', 'std. err'), ('ΔHNW * (Geographical Herfindahl)', 'p value'),
+                                    ('Constant', 'coef.'), ('Constant', 'std. err'),('Constant','p value'),
+                                     ('N',''),
+                                   ('R-squared','')] ) #names=['Group', 'Number']
+# Create multilevel columns
+columns = pd.MultiIndex.from_tuples([('Global Trade', 'N','N','N'),
+                                    ('Geographical Concentration', 'N','N','N'),
+                                    ('Global Trade', 'Y','N','N'),
+                                    ('Geographical Concentration', 'Y','N','N'),
+                                     ('(5)', 'N','N','N'),
+                                     ('(6)', 'N','Y','Y'),
+                                     ('(7)', 'N','N','Y')],
+                                    names=['Tradable definition used','2-digit 2006 employment share controls?','4-digit Industry Fixed Effects','County Fixed Effects']) #names=['Metric', 'Sub']
+# Create the DataFrame
+data = [[round(res1.params['netwp_h'],3), round(res2.params['netwp_h'],3), round(res3.params['netwp_h'],3), round(res4.params['netwp_h'],3), round(res5.params['netwp_h'],3), round(res6.params['netwp_h'],3), None],
+        [round(res1.bse['netwp_h'],3), round(res2.bse['netwp_h'],3), round(res3.bse['netwp_h'],3), round(res4.bse['netwp_h'],3), round(res5.bse['netwp_h'],3), round(res6.bse['netwp_h'],3), None],
+        [round(res1.pvalues['netwp_h'],3), round(res2.pvalues['netwp_h'],3), round(res3.pvalues['netwp_h'],3), round(res4.pvalues['netwp_h'],3), round(res5.pvalues['netwp_h'],3), round(res6.pvalues['netwp_h'],3), None],
+        [None, None, None, None, round(res5.params['Iherf'],3), None, None],
+        [None, None, None, None, round(res5.bse['Iherf'],3), None, None],
+        [None, None, None, None, round(res5.pvalues['Iherf'],3), None, None],
+        [None, None, None, None, round(res5.params['netwpherf_b'],3), round(res6.params['netwpherf_b'],3), round(res7.params['netwpherf_b'],3)],
+        [None, None, None, None, round(res5.bse['netwpherf_b'],3), round(res6.bse['netwpherf_b'],3), round(res7.bse['netwpherf_b'],3)],
+        [None, None, None, None, round(res5.pvalues['netwpherf_b'],3), round(res6.pvalues['netwpherf_b'],3), round(res7.pvalues['netwpherf_b'],3)],
+        [round(res1.params['const'],3), round(res2.params['const'],3), round(res3.params['const'],3), round(res4.params['const'],3), round(res5.params['Intercept'],3), None, None],
+        [round(res1.bse['const'],3), round(res2.bse['const'],3), round(res3.bse['const'],3), round(res4.bse['const'],3), round(res5.bse['Intercept'],3), None, None],
+        [round(res1.pvalues['const'],3), round(res2.pvalues['const'],3), round(res3.pvalues['const'],3), round(res4.pvalues['const'],3), round(res5.pvalues['Intercept'],3), None, None],
+        [int(res1.nobs), int(res2.nobs), int(res3.nobs), int(res4.nobs), int(res5.nobs), int(res6.nobs), int(res7.nobs)],
+        [round(res1.rsquared,3), round(res2.rsquared,3), round(res3.rsquared,3), round(res4.rsquared,3), round(res5.rsquared,3), round(res6.rsquared,3), round(res7.rsquared,3)]]
+table_7 = pd.DataFrame(data, index=index, columns=columns)
+table_7.to_excel('Table7.xlsx')
+
+####################################################################################
+#Table 8 - Wages and Mobility
+####################################################################################
+import pandas as pd
+import numpy as np
+import statsmodels.formula.api as smf
+
+data = df_county
+# Generate log population change
+data["pop0709"] = np.log(data["pop2009"]) - np.log(data["pop2007"])
+data.dropna(subset=["Cwage_0709", "netwp_h", "total", "statename", "Cwagehr_Wmean0709","pop0709"],inplace=True)
+# Cwage_0709 ~ netwp_h
+model1 = smf.wls("Cwage_0709 ~ netwp_h", data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# Cwage_0709 ~ netwp_h + C2D06share*
+model2 = smf.wls("Cwage_0709 ~ netwp_h + " + " + ".join([f"C2D06share{i}" for i in range(1, 24)]),
+                 data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# Cwagehr_Wmean0709 ~ netwp_h
+model3 = smf.wls("Cwagehr_Wmean0709 ~ netwp_h", data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# Cwagehr_Wmean0709 ~ netwp_h + C2D06share*
+model4 = smf.wls("Cwagehr_Wmean0709 ~ netwp_h + " + " + ".join([f"C2D06share{i}" for i in range(1, 24)]),
+                 data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# pop0709 ~ netwp_h
+model5 = smf.wls("pop0709 ~ netwp_h", data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# pop0709 ~ netwp_h + C2D06share*
+model6 = smf.wls("pop0709 ~ netwp_h + " + " + ".join([f"C2D06share{i}" for i in range(1, 24)]),
+                 data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# Cmovest0709 ~ netwp_h
+model7 = smf.wls("Cmovest0709 ~ netwp_h", data=data, weights=data["total"]).fit(cov_type="HC1")
+
+# Cmovest0709 ~ netwp_h + C2D06share*
+model8 = smf.wls("Cmovest0709 ~ netwp_h + " + " + ".join([f"C2D06share{i}" for i in range(1, 24)]),
+                 data=data, weights=data["total"]).fit(cov_type="HC1")
+
+# Clf_0709 ~ netwp_h
+model9 = smf.wls("Clf_0709 ~ netwp_h", data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# Clf_0709 ~ netwp_h + C2D06share*
+model10 = smf.wls("Clf_0709 ~ netwp_h + " + " + ".join([f"C2D06share{i}" for i in range(1, 24)]),
+                  data=data, weights=data["total"]).fit(
+    cov_type="cluster", cov_kwds={"groups": data["statename"]}
+)
+
+# Create MultiIndex for rows
+index = pd.MultiIndex.from_tuples([('Change in Housing Net Worth,2006-2009', 'coef.'), ('Change in Housing Net Worth,2006-2009', 'std. err'), ('Change in Housing Net Worth,2006-2009', 'p value'),
+                                    ('Constant', 'coef.'), ('Constant', 'std. err'),('Constant','p value'),
+                                     ('N',''),
+                                   ('R-squared','')] ) #names=['Group', 'Number']
+# Create multilevel columns
+columns = ['Total wage growth, 2007 to 2009, CBP', 'Average Hourly wage growth, 2007 to 2009, ACS','Population growth, 2007-2009', 'Labor force growth, 2007-2009']
+# Create the DataFrame
+data = [[round(model1.params['netwp_h'],3), round(model3.params['netwp_h'],3), round(model5.params['netwp_h'],3), round(model9.params['netwp_h'],4)],
+        [round(model1.bse['netwp_h'],3), round(model3.bse['netwp_h'],3), round(model5.bse['netwp_h'],3), round(model9.bse['netwp_h'],3)],
+        [round(model1.pvalues['netwp_h'],3), round(model3.pvalues['netwp_h'],3), round(model5.pvalues['netwp_h'],3), round(model9.pvalues['netwp_h'],3)],
+        [round(model1.params['Intercept'],3), round(model3.params['Intercept'],3), round(model5.params['Intercept'],3), round(model9.params['Intercept'],4)],
+        [round(model1.bse['Intercept'],3), round(model3.bse['Intercept'],3), round(model5.bse['Intercept'],3), round(model9.bse['Intercept'],3)],
+        [round(model1.pvalues['Intercept'],3), round(model3.pvalues['Intercept'],3), round(model5.bse['Intercept'],3), round(model9.bse['Intercept'],3)],
+        [int(model1.nobs), int(model3.nobs), int(model5.nobs), int(model9.nobs)],
+        [round(model1.rsquared,3), round(model3.rsquared,3), round(model5.rsquared,3), round(model9.rsquared,3)]]
+table_8 = pd.DataFrame(data, index=index, columns=columns)
+table_8.to_excel('Table8.xlsx')
+
+
+
+
+
+
